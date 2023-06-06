@@ -14,6 +14,7 @@ class RPN(nn.Module):
     def __init__(self) -> None:
         super().__init__()
 
+        # hardcoded scales and ratios
         self.anchor_scales = torch.as_tensor([8, 16, 32]).float()
         self.anchor_ratios = torch.as_tensor([0.5, 1, 2]).float()
         self.feat_stride = 16
@@ -55,9 +56,9 @@ class RPN(nn.Module):
     @staticmethod
     def compute_loss(
         rpn_cls_score: Float[Tensor, "B 18 H W"],
-        rpn_bbox_pred: Float[Tensor, "B 36 H W"],
-        rpn_label: Float[Tensor, "B 1 9H W"],
-        rpn_bbox_target: Float[Tensor, "B 36 H W"],
+        rpn_bbox_delta_pred: Float[Tensor, "B 36 H W"],
+        rpn_label: Float[Tensor, "B 9 H W"],
+        rpn_bbox_delta_target: Float[Tensor, "B 36 H W"],
         rpn_bbox_inside_weight: Float[Tensor, "B 36 H W"],
         rpn_bbox_outside_weight: Float[Tensor, "B 36 H W"],
     ) -> Tuple[Float[Tensor, "1"], Float[Tensor, "1"]]:
@@ -74,8 +75,8 @@ class RPN(nn.Module):
 
         # compute bbox regression loss
         rpn_box_loss = smooth_l1_loss(
-            rpn_bbox_pred,
-            rpn_bbox_target,
+            rpn_bbox_delta_pred,
+            rpn_bbox_delta_target,
             rpn_bbox_inside_weight,
             rpn_bbox_outside_weight,
             sigma=3.0,
@@ -86,11 +87,11 @@ class RPN(nn.Module):
     def forward(
         self,
         features: Float[Tensor, "B 512 H W"],
-        img_info: Float[Tensor, "B 2"],
-        gt_boxes: Optional[Float[Tensor, "B K 4"]]
+        gt_boxes: Optional[Float[Tensor, "B K 4"]],
+        img_info: Float[Tensor, "2"],
     ) -> Tuple[Float[Tensor, "B M 5"], Float[Tensor, "1"], Float[Tensor, "1"]]:
         # convert pixels to feature maps
-        rpn_conv = self.rpn_conv(features)
+        rpn_conv = F.relu(self.rpn_conv(features), inplace=True)
 
         # compute cls score
         rpn_cls_score = self.score_conv(rpn_conv)
@@ -98,23 +99,24 @@ class RPN(nn.Module):
         rpn_cls_prob = F.softmax(rpn_cls_score_reshape, 1)
         rpn_cls_prob_reshape = self.reshape_layer(rpn_cls_prob, self.nc_score_out)
 
-        # compute rpn boxes
-        rpn_bbox_pred = self.bbox_conv(rpn_conv)
+        # compute rpn boxes deltas
+        rpn_bbox_delta = self.bbox_conv(rpn_conv)
 
         # compute proposal
         state = "train" if self.training else "test"
-        rois = self.proposal_layer(rpn_cls_prob_reshape, rpn_bbox_pred, img_info, state)
+        rois = self.proposal_layer(rpn_cls_prob_reshape, rpn_bbox_delta, img_info, state)
 
         # generate training labels and compute rpn loss
         rpn_cls_loss, rpn_box_loss = 0, 0
         if self.training:
             rpn_data = self.anchor_target_layer(rpn_cls_score, gt_boxes, img_info)
             rpn_cls_loss, rpn_box_loss = self.compute_loss(
-                rpn_cls_prob_reshape,
-                rpn_bbox_pred,
+                rpn_cls_score_reshape,
+                rpn_bbox_delta,
                 **rpn_data
             )
         
+        # roi [B, M, 5] [batch_idx, bbox]
         return rois, rpn_cls_loss, rpn_box_loss
     
 
@@ -151,7 +153,7 @@ class FasterRCNN(nn.Module):
         super().__init__()
         self.n_classes = n_classes
 
-        # backbone VGG16
+        # define backbone VGG16
         vgg = models.vgg16(weights=models.VGG16_Weights.DEFAULT)
         self.backbone = nn.Sequential(*list(vgg.features._modules.values())[:-1])
         # fix first 10 layers
@@ -180,27 +182,35 @@ class FasterRCNN(nn.Module):
     def forward(
         self,
         images: Float[Tensor, "B 3 H W"],
-        img_info: Float[Tensor, "B 2"],
-        gt_boxes: Float[Tensor, "B M 5"]
+        gt_boxes: Float[Tensor, "B M 5"],
+        img_info: Float[Tensor, "2"],
     ) -> Dict[str, Any]:
         batch_size = images.shape[0]
 
-        # use backbone to get feature map
+        # use backbone to get feature map [B 512, H/16, W/16]
         base_feat = self.backbone(images)
 
         # use regoin proposal networks to obtain rois
-        rois, rpn_cls_loss, rpn_box_loss = self.rpn(base_feat, img_info, gt_boxes)
+        rois, rpn_cls_loss, rpn_box_loss = self.rpn(base_feat, gt_boxes, img_info)
 
         # if training phase, use ground-truth for refine
-        rois, rois_label, rois_target, rois_inside_ws, rois_outside_ws = None, None, None, None
+        rois_label: Tensor = None
+        rois_delta_target: Tensor = None
+        rois_inside_ws: Tensor = None
+        rois_outside_ws: Tensor = None
         if self.training:
             (
-                rois,
-                rois_label,
-                rois_target,
-                rois_inside_ws,
-                rois_outside_ws
+                rois, # [B, 128, 5]
+                rois_label, # [B, 128]
+                rois_delta_target, # [B, 128, 4]
+                rois_inside_ws, # [B, 128, 4]
+                rois_outside_ws # [B, 128, 4]
             ) = self.proposal_target_layer(rois, gt_boxes)
+
+            rois_label = rois_label.view(-1).long()
+            rois_delta_target = rois_delta_target.view(-1, rois_delta_target.shape[2])
+            rois_inside_ws = rois_inside_ws.view(-1, rois_inside_ws.shape[2])
+            rois_outside_ws = rois_outside_ws.view(-1, rois_outside_ws.shape[2])
 
         pooled_feat = self.roi_pool(base_feat, rois.view(-1, 5))
         pooled_feat = self.mlp(pooled_feat.view(pooled_feat.shape[0], -1))
@@ -212,7 +222,7 @@ class FasterRCNN(nn.Module):
             bbox_pred_select = torch.gather(
                 bbox_pred_reshape,
                 1,
-                rois_label.view(rois_label.shape[0], 1, 1).expand(rois_label.shape[0], 1, 4)
+                rois_label[..., None, None].expand(rois_label.shape[0], 1, 4)
             )
             bbox_pred = bbox_pred_select.squeeze(1)
         
@@ -228,7 +238,7 @@ class FasterRCNN(nn.Module):
             # bbox regression L1 loss
             rcnn_box_loss = smooth_l1_loss(
                 bbox_pred,
-                rois_target,
+                rois_delta_target,
                 rois_inside_ws,
                 rois_outside_ws
             )

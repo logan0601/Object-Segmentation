@@ -21,13 +21,14 @@ def generate_anchors(
     hs = hs[:, None] * scales[None, :]
 
     # anchor
+    # FIXME: add 1
     wh = torch.stack([ws, hs], dim=-1).view(-1, 2)
     anchors = torch.cat([center - 0.5 * (wh - 1), center + 0.5 * (wh - 1)], dim=-1) + 1.0
     return anchors
 
 
 def bbox_transform(
-    anchors: Float[Tensor, "N 4"], gt: Float[Tensor, "B M 4"]
+    anchors: Float[Tensor, "... N 4"], gt: Float[Tensor, "B M 4"]
 ) -> Float[Tensor, "B M 4"]:
     """ compute target transform from anchors to gt """
     if anchors.dim() == 2:
@@ -117,8 +118,9 @@ def bbox_overlaps(
     gt_boxes_y = gt_boxes[..., 3] - gt_boxes[..., 1] + 1
     gt_boxes_area = (gt_boxes_x * gt_boxes_y)[:, None]
 
-    anchors_area_zero = (anchors_boxes_x == 1) & (anchors_boxes_y == 1)
-    gt_area_zero = (gt_boxes_x == 1) & (gt_boxes_y == 1)
+    # FIXME: height or width eq 1 mean zero area
+    anchors_area_zero = (anchors_boxes_x == 1) | (anchors_boxes_y == 1)
+    gt_area_zero = (gt_boxes_x == 1) | (gt_boxes_y == 1)
 
     boxes = anchors[:, :, None, :].expand(batch_size, N, K, 4)
     query_boxes = gt_boxes[:, None, :, :].expand(batch_size, N, K, 4)
@@ -134,6 +136,7 @@ def bbox_overlaps(
     union = anchors_area + gt_boxes_area - (iw * ih)
     overlaps = iw * ih / union
 
+    # anchors/gt_boxes cant be zero, overlaps with iou
     overlaps.masked_fill_(gt_area_zero[:, None].expand(batch_size, N, K), 0)
     overlaps.masked_fill_(anchors_area_zero[..., None].expand(batch_size, N, K), -1)
     return overlaps
@@ -141,13 +144,12 @@ def bbox_overlaps(
 
 def clip_boxes(
     boxes: Float[Tensor, "B N 4"],
-    img_shape: Float[Tensor, "B 2"]
+    img_shape: Float[Tensor, "2"]
 ) -> Float[Tensor, "B N 4"]:
     """ clip out of image size boxes """
-    batch_size = boxes.shape[0]
-    for i in range(batch_size):
-        boxes[i, :, 0].clamp_(0, img_shape[i, 1] - 1)
-        boxes[i, :, 1].clamp_(0, img_shape[i, 0] - 1)
-        boxes[i, :, 2].clamp_(0, img_shape[i, 1] - 1)
-        boxes[i, :, 3].clamp_(0, img_shape[i, 0] - 1)
+    h, w = img_shape
+    boxes[..., 0].clamp_(0, w - 1)
+    boxes[..., 1].clamp_(0, h - 1)
+    boxes[..., 2].clamp_(0, w - 1)
+    boxes[..., 3].clamp_(0, h - 1)
     return boxes

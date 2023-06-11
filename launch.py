@@ -1,40 +1,51 @@
-import torch
-import numpy as np
-from PIL import Image
-
-from objseg.models.rcnn import FasterRCNN
-from objseg.utils.ops import scale_tensor
+import argparse
+import os
+import logging
 
 
-# net = FasterRCNN(80)
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--gpu", default="0", help="GPU(s) to be used")
 
-# path = "datasets/example_data/1-1-0_color_kinect.png"
-# im = torch.from_numpy(np.array(Image.open(path), dtype=np.float32) / 255)
-# im = im.permute(2, 0, 1).unsqueeze(0)
+    group = parser.add_mutually_exclusive_group(required=True)
+    group.add_argument("--train", action="store_true")
+    group.add_argument("--validate", action="store_true")
+    group.add_argument("--test", action="store_true")
 
-# feats = net(im)
-# feats = feats[0].permute(1, 2, 0)
-# feats = scale_tensor(feats, [feats.min(), feats.max()], [0, 1])
+    parser.add_argument(
+        "--resume", action="store_true", help="if true, resume from previous ckpt"
+    )
+    parser.add_argument(
+        "--verbose", action="store_true", help="if true, set logging level to DEBUG"
+    )
+    args, extras = parser.parse_known_args()
 
-# feats = feats.detach().cpu().numpy() * 255.0
-# print(feats.shape)
+    import segment
+    from segment.utils.process import setup
+    setup()
 
-# im = Image.fromarray(feats.astype(np.float32))
-# im.save("datasets/example_data/3.png")
+    logger = logging.getLogger("object_segmentation")
+    logger.setLevel(logging.INFO)
+    if args.verbose:
+        logger.setLevel(logging.DEBUG)
 
+    os.environ["CUDA_VISIBLE_DEVICES"] = args.gpu
+    os.makedirs("outputs/", exist_ok=True)
 
-import glob
-import pickle
-from tqdm import tqdm
+    # 2D detect
+    from segment.data.base import BaseDataModule
+    from segment.models.base import BaseSystem
+    dm: BaseDataModule = segment.find("image-datamodule")()
+    module: BaseSystem = segment.find("2d-detector")(dm, resume=args.resume)
+    # module.fit()
+    # module.inference()
+    # module.visualize()
 
+    # 3D detect
+    fm = BaseDataModule = segment.find("frustum-datamodule")(stage="fit")
+    system: BaseSystem = segment.find("3d-segmentor")(fm, resume=False)
+    system.fit()
+    # system.evaluate()
 
-dataset = "../datasets/training_data/data"
-tot = len(glob.glob(f"{dataset}/*.pkl"))
-
-for i, path in enumerate(glob.glob(f"{dataset}/*.pkl")):
-    with open(path, 'rb') as f:
-        data = pickle.load(f)
-        assert len(data.keys()) == 1
-    
-    if (i + 1) % 2000 == 0:
-        print(f"{i + 1}/{tot}")
+if __name__ == "__main__":
+    main()

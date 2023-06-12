@@ -31,3 +31,6 @@ class BaseSystem:
 
     def visualize(self) -> None:
         raise NotImplementedError
+    
+    def fit_pose(self) -> None:
+        raise NotImplementedError

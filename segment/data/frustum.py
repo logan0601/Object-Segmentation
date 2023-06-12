@@ -29,7 +29,7 @@ class FrustumDataset(Dataset):
             self.max_size = 1000
         elif self.split in ["val"]:
             self.max_size = 2500
-        elif self.split in ["test"]:
+        elif self.split in ["test", "apply"]:
             self.max_size = 1000
 
         # meta
@@ -48,15 +48,24 @@ class FrustumDataset(Dataset):
             self.meta = sorted(glob.glob(
                 os.path.join(os.path.dirname(cfg.test_dir), "process", "*_data.pth")))
             self.proposals = json.load(open(os.path.join(
-                cfg.output_dir, "proposal_test.json"
+                cfg.output_dir, "2Dproposal.json"
             )))
+        elif self.split in ["apply"]:
+            prefixs = sorted(glob.glob(
+                os.path.join(os.path.dirname(cfg.applic_dir), "process", "*_meta.pth")
+            ))
+            self.meta = [
+                os.path.join(os.path.dirname(cfg.train_dir), "process", os.path.basename(prefix).replace("meta", "data"))
+                for prefix in prefixs
+            ]
+            self.meta_pose = [torch.load(data) for data in tqdm(prefixs)]
 
         segment.info("Loading frustum points...")
         self.load_idx = 0
         self.load_tot = len(self.meta) // self.max_size
         if self.split in ["train"]:
             self.rand_list = np.random.permutation(len(self.meta))
-        elif self.split in ["val", "test"]:
+        elif self.split in ["val", "test", "apply"]:
             self.rand_list = np.arange(len(self.meta))
         self.tem_list = [torch.load(self.meta[ind]) for ind in tqdm(self.rand_list[:self.max_size])]
 
@@ -85,6 +94,7 @@ class FrustumDataset(Dataset):
             lbl = bbox[:, 4]
             mask = (dif_y > 0) * (dif_x > 0) * (lbl < cfg.num_objects)
             bbox = bbox[mask]
+            bbox[:, 2:4] += 1
             return {
                 "id": index,
                 "rgb": rgb,
@@ -95,13 +105,49 @@ class FrustumDataset(Dataset):
             }
         elif self.split in ["test"]:
             rgb, dep, intrin = self.tem_list[index]
+            box, ids, sco = self.proposals[
+                self.rand_list[self.load_idx * self.max_size + index]
+            ]
             rgb = rgb.float() / 255
             dep = dep.float() / 1000
+            box = torch.as_tensor(box, dtype=torch.int32)
+            x_lo = box[:, 0]
+            y_lo = box[:, 1]
+            x_hi = box[:, 2]
+            y_hi = box[:, 3]
+            ids = torch.as_tensor(ids, dtype=torch.int32)
+            sco = torch.as_tensor(sco, dtype=torch.float32)
+            bbox = torch.stack([y_lo, x_lo, y_hi+1, x_hi+1, ids], dim=1)
+            bbox = bbox[sco > 0.3]
+            bbox = bbox[:60]
             return {
                 "id": index,
                 "rgb": rgb,
                 "dep": dep,
-                "intrin": intrin
+                "bbox": bbox,
+                "intrin": intrin,
+                "score": sco
+            }
+        elif self.split in ["apply"]:
+            rgb, dep, lab, intrin, bbox = self.tem_list[index]
+            rgb = rgb.float() / 255
+            dep = dep.float() / 1000
+            dif_y = bbox[:, 2] - bbox[:, 0]
+            dif_x = bbox[:, 3] - bbox[:, 1]
+            lbl = bbox[:, 4]
+            mask = (dif_y > 0) * (dif_x > 0) * (lbl < cfg.num_objects)
+            bbox = bbox[mask]
+            bbox[:, 2:4] += 1
+            corner, pose = self.meta_pose[index]
+            return {
+                "id": index,
+                "rgb": rgb,
+                "dep": dep,
+                "intrin": intrin,
+                "bbox": bbox,
+                "label": lab.clamp_(0, cfg.num_objects),
+                "corner": corner,
+                "pose": pose
             }
 
 
@@ -118,6 +164,8 @@ class FrustumDataModule(BaseDataModule):
             self.val_dataset = FrustumDataset(split="val")
         if self.stage in [None, "test"]:
             self.test_dataset = FrustumDataset(split="test")
+        if self.stage in [None, "apply"]:
+            self.apply_dataset = FrustumDataset(split="apply")
         
     def general_loader(self, dataset: Dataset, batch_size: int) -> DataLoader:
         return DataLoader(
@@ -140,4 +188,9 @@ class FrustumDataModule(BaseDataModule):
     def test_dataloader(self) -> DataLoader:
         return self.general_loader(
             self.test_dataset, batch_size=1
+        )
+    
+    def apply_dataloader(self) -> DataLoader:
+        return self.general_loader(
+            self.apply_dataset, batch_size=1
         )

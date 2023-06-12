@@ -30,6 +30,7 @@ class ExperimentConfig:
     test_dir: str = "datasets/testing_data/data"
     split_dir: str = "datasets/training_data/splits"
     output_dir: str = "outputs/"
+    applic_dir: str = "datasets/application_data/data"
 
     # freq
     eval_every: int = 2000

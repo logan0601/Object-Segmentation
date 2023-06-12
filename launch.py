@@ -38,14 +38,19 @@ def main():
     dm: BaseDataModule = segment.find("image-datamodule")()
     module: BaseSystem = segment.find("2d-detector")(dm, resume=args.resume)
     # module.fit()
+    # module.restore(name="model_final.pth")
     # module.inference()
     # module.visualize()
 
     # 3D detect
-    fm = BaseDataModule = segment.find("frustum-datamodule")(stage="fit")
-    system: BaseSystem = segment.find("3d-segmentor")(fm, resume=False)
-    system.fit()
+    fm = BaseDataModule = segment.find("frustum-datamodule")("apply")
+    system: BaseSystem = segment.find("3d-segmentor-v2")(fm, resume=False)
+    system.restore("model_00089.pth")
+    # system.fit()
     # system.evaluate()
+    # system.inference()
+    system.fit_pose()
+
 
 if __name__ == "__main__":
     main()

@@ -12,6 +12,7 @@ from tqdm import tqdm
 
 import segment
 from segment.utils.config import cfg
+from segment.utils.transform import estimate_poses
 from segment.utils.typing import *
 
 
@@ -99,6 +100,36 @@ def process(
             ), data_p)
 
 
+def process_pose(
+    file_list: List[str],
+    proc_dir: str,
+) -> None:
+    segment.info("Processing pose...")
+
+    os.makedirs(proc_dir, exist_ok=True)
+    for i, fn in tqdm(list(enumerate(file_list))):
+        meta = pickle.load(open(fn, "rb"))
+        pose_world = np.array([meta["poses_world"][idx] for idx in meta["object_ids"]])
+        box_sizes = np.array([meta["extents"][idx] * meta["scales"][idx] for idx in meta["object_ids"]])
+        corners, poses = [], []
+        for i in range(len(pose_world)):
+            corner, pose = estimate_poses(
+                center=pose_world[i][:3, 3],
+                size=box_sizes[i],
+                rotation=pose_world[i][:3, :3],
+                extrinsic=meta["extrinsic"]
+            )
+            corners.append(corner)
+            poses.append(pose)
+        
+        corners = torch.from_numpy(np.stack(corners, axis=0, dtype=np.float32))
+        poses = torch.from_numpy(np.stack(poses, axis=0, dtype=np.float32))
+        torch.save((
+            corners,
+            poses
+        ), os.path.join(proc_dir, os.path.basename(fn)[:-4] + ".pth"))
+
+
 def setup():
     # instaniate a logger
     logger = logging.getLogger("object_segmentation")
@@ -121,3 +152,9 @@ def setup():
         or len(os.listdir(proc_dir)) == 0:
         test_list = sorted(glob.glob(os.path.join(cfg.test_dir, "*_color_kinect.png")))
         process(test_list, proc_dir, test_set=True)
+
+    proc_dir = os.path.join(os.path.dirname(cfg.applic_dir), "process")
+    if not os.path.exists(proc_dir) \
+        or len(os.listdir(proc_dir)) == 0:
+        appl_list = sorted(glob.glob(os.path.join(cfg.applic_dir, "*_meta.pkl")))
+        process_pose(appl_list, proc_dir)

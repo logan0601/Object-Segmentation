@@ -44,12 +44,14 @@ def main():
 
     # 3D detect
     fm = BaseDataModule = segment.find("frustum-datamodule")("apply")
-    system: BaseSystem = segment.find("3d-segmentor-v2")(fm, resume=False)
+    system: BaseSystem = segment.find("3d-segmentor")(fm, resume=False)
     system.restore("model_00089.pth")
     # system.fit()
     # system.evaluate()
+    # print(system.metrics)
     # system.inference()
-    system.fit_pose()
+    # system.fit_pose()
+    system.inference_pose()
 
 
 if __name__ == "__main__":

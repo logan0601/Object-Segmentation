@@ -25,6 +25,7 @@ from segment.utils.ops import (
     euler_to_rotation,
     eval_pose
 )
+from segment.utils.visualize import demo_3d
 from segment.utils.typing import *
 
 
@@ -208,11 +209,11 @@ class STNNet(nn.Module):
             
             box_3d = generate_bbox(pnts).cuda()
             size = feat[:3][None]
-            cres = feat[3:6][None]
+            cres = feat[3:6]
             angle = feat[6:]
             rotation = euler_to_rotation(angle).cuda()
 
-            corner = (box_3d * size) @ rotation.T + center + cres
+            corner = (box_3d * size) @ rotation.T + center[None] + cres[None]
             pose = torch.zeros((4, 4), dtype=torch.float32).cuda()
             pose[:3, :3] = rotation
             pose[:3, 3] = center + cres
@@ -236,14 +237,17 @@ class Segmentor(BaseSystem):
         self.current_step = 0
         self.best_iou = 0
         self.metrics = None
-        self.output_dir = os.path.join(cfg.output_dir, "frustum-pointnet-v2")
+        self.output_dir = os.path.join(cfg.output_dir, "frustum-pointnet")
+        # self.trial = datetime.now().strftime("%Y%m%d-%H%M%S")
+        self.trial = "20230612-221717"
         os.makedirs(self.output_dir, exist_ok=True)
+        os.makedirs(os.path.join(self.output_dir, self.trial), exist_ok=True)
 
         self.segmentor = FrustumSegmentationNet().cuda()
         self.estimator = STNNet().cuda()
         self.optimizer = optim.Adam(self.segmentor.parameters(), lr=1e-3)
         self.writer = SummaryWriter(os.path.join(
-            self.output_dir, "log-{}".format(datetime.now().strftime("%Y%m%d-%H%M%S"))
+            self.output_dir, self.trial, "log"
         ))
 
     def restore(
@@ -384,7 +388,7 @@ class Segmentor(BaseSystem):
         segment.info("3d detector inferencing...")
         self.segmentor.eval()
         # FIXME: hardcode output dir
-        os.makedirs(os.path.join(self.output_dir, "res"), exist_ok=True)
+        os.makedirs(os.path.join(self.output_dir, "res-4"), exist_ok=True)
         dataset: FrustumDataset = self.datamodule.test_dataset
         dataloader = self.datamodule.test_dataloader()
         for batch in tqdm(dataloader):
@@ -410,13 +414,13 @@ class Segmentor(BaseSystem):
             pred = pred.detach().cpu().numpy()
             prefix = dataset.get_prefix(batch["id"][0])
             Image.fromarray(pred).convert('P').save(
-                os.path.join(self.output_dir, "res", prefix + "_label_kinect.png")
+                os.path.join(self.output_dir, "res-4", prefix + "_label_kinect.png")
             )
             pred = np.expand_dims(pred, axis=2).repeat(3, axis=2).astype(np.uint8)
             Image.fromarray(
                 np.concatenate([(rgb.detach().cpu().numpy() * 255).astype(np.uint8), pred], axis=1)
             ).save(
-                os.path.join(self.output_dir, "res", prefix + "_concat.png")
+                os.path.join(self.output_dir, "res-4", prefix + "_concat.png")
             )
 
     def fit_pose(
@@ -428,8 +432,15 @@ class Segmentor(BaseSystem):
             p.requires_grad = False
 
         optimizer = optim.Adam(self.estimator.parameters(), lr=1e-3)
+
+        data = torch.load(os.path.join(self.output_dir, self.trial, f"model_00288.pth"))
+        first_epoch = data["epoch"]
+        self.estimator.load_state_dict(data["model"])
+        optimizer.load_state_dict(data["optim"])
+
         dataloader = self.datamodule.apply_dataloader()
-        for epoch in range(cfg.max_epochs):
+        best_loss = 0.0101
+        for epoch in range(first_epoch, 480):
             avg_loss = 0
             avg_r_diff = 0
             avg_t_diff = 0
@@ -465,3 +476,64 @@ class Segmentor(BaseSystem):
 
             segment.info(
                 f"Epoch: {epoch}/{cfg.max_epochs}, train loss: {avg_loss:.4f}, t_diff: {avg_t_diff:.4f}, r_diff: {avg_r_diff:.4f}")
+            
+            if avg_loss < best_loss:
+                segment.info("Updating checkpoint...")
+                best_loss = avg_loss
+                torch.save({
+                    "epoch": epoch,
+                    "model": self.estimator.state_dict(),
+                    "optim": optimizer.state_dict()
+                }, os.path.join(self.output_dir, self.trial, f"model_{epoch:05d}.pth"))
+
+    def inference_pose(
+        self,
+    ) -> None:
+        segment.info("Inferencing 3d poses...")
+        # fix segmentor
+        for p in self.segmentor.parameters():
+            p.requires_grad = False
+
+        data = torch.load(os.path.join(self.output_dir, self.trial, f"model_00288.pth"))
+        self.estimator.load_state_dict(data["model"])
+        self.estimator.eval()
+
+        os.makedirs(os.path.join(self.output_dir, "pose"), exist_ok=True)
+
+        dataset: FrustumDataset = self.datamodule.apply_dataset
+        dataloader = self.datamodule.apply_dataloader()
+        for batch in tqdm(dataloader):
+            torch.cuda.empty_cache()
+            rgb = batch["rgb"][0].cuda()
+            dep = batch["dep"][0].cuda()
+            bbox = batch["bbox"][0].cuda()
+            intrin = batch["intrin"][0].cuda()
+            label = batch["label"][0].cuda().long()
+            corner = batch["corner"][0].cuda()
+            pose = batch["pose"][0].cuda()
+
+            out = self.estimator(rgb, dep, bbox, intrin, label)
+
+            im = rgb.detach().cpu().numpy() * 255
+            gt = im.copy() * 255
+            intr = intrin.detach().cpu().numpy()
+
+            loss = 0
+            r_diff, t_diff = 0, 0
+            for (box, pred), cor, pos in zip(out, corner, pose):
+                loss += F.mse_loss(box, cor)
+                r_, t_ = eval_pose(pred.detach().cpu().numpy(), pos.detach().cpu().numpy())
+                r_diff += r_.item()
+                t_diff += t_.item()
+
+                box = box.detach().cpu().numpy()
+                cor = cor.detach().cpu().numpy()
+
+                im = demo_3d(im, box, intr)
+                gt = demo_3d(gt, cor, intr)
+            
+            Image.fromarray(
+                np.concatenate([gt, im], axis=1).astype(np.uint8)
+            ).save(
+                os.path.join(self.output_dir, "pose", dataset.get_prefix(batch["id"][0]) + "_pose.png")
+            )

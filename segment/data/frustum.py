@@ -26,7 +26,7 @@ class FrustumDataset(Dataset):
         self.split = split
         
         if self.split in ["train"]:
-            self.max_size = 1000
+            self.max_size = 10
         elif self.split in ["val"]:
             self.max_size = 2500
         elif self.split in ["test", "apply"]:
@@ -48,7 +48,7 @@ class FrustumDataset(Dataset):
             self.meta = sorted(glob.glob(
                 os.path.join(os.path.dirname(cfg.test_dir), "process", "*_data.pth")))
             self.proposals = json.load(open(os.path.join(
-                cfg.output_dir, "2Dproposal.json"
+                cfg.output_dir, "proposal_test.json"
             )))
         elif self.split in ["apply"]:
             prefixs = sorted(glob.glob(
@@ -164,7 +164,7 @@ class FrustumDataModule(BaseDataModule):
             self.val_dataset = FrustumDataset(split="val")
         if self.stage in [None, "test"]:
             self.test_dataset = FrustumDataset(split="test")
-        if self.stage in [None, "apply"]:
+        if self.stage in ["apply"]:
             self.apply_dataset = FrustumDataset(split="apply")
         
     def general_loader(self, dataset: Dataset, batch_size: int) -> DataLoader:

@@ -34,3 +34,6 @@ class BaseSystem:
     
     def fit_pose(self) -> None:
         raise NotImplementedError
+    
+    def inference_pose(self) -> None:
+        raise NotImplementedError
